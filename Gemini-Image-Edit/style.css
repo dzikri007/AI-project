@@ -1,20 +1,31 @@
 /* Creating a more modern looking UI for the Gemini Image Editing App */
 /* Global Styles */
+/* Creating a more modern looking UI for the Gemini Image Editing App */
+/* Global Styles - Disesuaikan dengan Tema Maroon & Beige */
 :root {
-  --primary-color: #4f46e5;
-  --primary-light: #6366f1;
-  --primary-dark: #3730a3;
-  --secondary-color: #9333ea;
-  --accent-color: #ec4899;
-  --text-color: #0f172a;
-  --text-light: #64748b;
-  --bg-color: #f8fafc;
-  --card-bg: #ffffff;
-  --border-color: #e2e8f0;
-  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --primary-color: #800000;      /* Maroon */
+  --primary-light: #A52A2A;      /* Lighter Maroon / Brown */
+  --primary-dark: #5A0000;       /* Dark Maroon */
+  --secondary-color: #8B0000;    /* Dark Red (untuk gradasi) */
+  --accent-color: #D4AF37;       /* Gold/Beige Gelap (untuk aksen) */
+  --text-color: #2E1515;         /* Cokelat sangat gelap (untuk teks di background terang) */
+  --text-light: #704242;         /* Cokelat medium */
+  --bg-color: #F5F5DC;           /* Beige */
+  --card-bg: #FFFDF7;            /* Beige sangat terang (hampir putih untuk kartu) */
+  --border-color: #E6D8D8;
+  --shadow: 0 4px 6px -1px rgba(128, 0, 0, 0.15), 0 2px 4px -1px rgba(128, 0, 0, 0.1);
   --transition: all 0.3s ease;
   --radius: 12px;
   --header-gradient: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+}
+
+/* Dark mode support - Disesuaikan agar bernuansa Dark Maroon */
+.dark {
+  --text-color: #F5F5DC;         /* Teks jadi Beige */
+  --text-light: #D3C4C4;
+  --bg-color: #1A0D0D;           /* Background gelap (hitam kemerahan) */
+  --card-bg: #2E1515;            /* Kartu warna cokelat/maroon gelap */
+  --border-color: #4A2525;
 }
 
 /* Dark mode support */
@@ -135,31 +146,19 @@
   margin-bottom: 0.5rem;
 }
 
-/* Adding Dark mode handling */
-/* Generate button - Modified to use header gradient in both light and dark mode */
+/* Generate button */
 .gr-button.gr-button-primary, 
 button.generate-btn,
 #component-54 > div.svelte-1pf7t34 > div > button {
-  background: var(--header-gradient) !important;
-  color: white !important;
-  border: none !important;
-  border-radius: var(--radius) !important;
-  padding: 0.75rem 1.5rem !important;
-  font-size: 1rem !important;
-  font-weight: 600 !important;
-  cursor: pointer !important;
-  transition: var(--transition) !important;
-  width: 100% !important;
-  text-transform: uppercase !important;
-  letter-spacing: 1px !important;
-  box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.4) !important;
+  /* ... (biarkan kode lainnya tetap sama) ... */
+  box-shadow: 0 4px 6px -1px rgba(128, 0, 0, 0.4) !important; /* Ubah rgba jadi merah muda */
 }
 
 .gr-button.gr-button-primary:hover,
 button.generate-btn:hover,
 #component-54 > div.svelte-1pf7t34 > div > button:hover {
   transform: translateY(-2px) !important;
-  box-shadow: 0 10px 15px -3px rgba(79, 70, 229, 0.4) !important;
+  box-shadow: 0 10px 15px -3px rgba(128, 0, 0, 0.4) !important; /* Ubah rgba jadi merah muda */
 }
 
 .gr-button.gr-button-primary:active,
