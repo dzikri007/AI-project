@@ -1,0 +1,1296 @@
+import os
+import gc
+import gradio as gr
+import numpy as np
+import spaces
+import torch
+import random
+import base64
+import json
+import html as html_lib
+from io import BytesIO
+from PIL import Image
+
+MAX_SEED = np.iinfo(np.int32).max
+LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print("CUDA_VISIBLE_DEVICES=", os.environ.get("CUDA_VISIBLE_DEVICES"))
+print("torch.__version__ =", torch.__version__)
+print("Using device:", device)
+
+from diffusers import FlowMatchEulerDiscreteScheduler
+from qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
+from qwenimage.transformer_qwenimage import QwenImageTransformer2DModel
+from qwenimage.qwen_fa3_processor import QwenDoubleStreamAttnProcessorFA3
+
+# Tentukan dtype berdasarkan device
+dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
+
+print(f"Using dtype: {dtype}")
+
+# Load model dengan fallback untuk CPU
+try:
+    device_map = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading model with device_map: {device_map}")
+    
+    pipe = QwenImageEditPlusPipeline.from_pretrained(
+        "FireRedTeam/FireRed-Image-Edit-1.1",
+        transformer=QwenImageTransformer2DModel.from_pretrained(
+            "prithivMLmods/Qwen-Image-Edit-Rapid-AIO-V19",
+            torch_dtype=dtype,
+            device_map=device_map,
+        ),
+        torch_dtype=dtype,
+    ).to(device)
+    print("✓ Model loaded successfully")
+except Exception as e:
+    print(f"⚠️  Error loading model with device_map={device_map}: {e}")
+    print("Trying alternative loading method...")
+    try:
+        pipe = QwenImageEditPlusPipeline.from_pretrained(
+            "FireRedTeam/FireRed-Image-Edit-1.1",
+            transformer=QwenImageTransformer2DModel.from_pretrained(
+                "prithivMLmods/Qwen-Image-Edit-Rapid-AIO-V19",
+                torch_dtype=dtype,
+            ),
+            torch_dtype=dtype,
+        )
+        if device.type == "cuda":
+            pipe = pipe.to(device)
+        print("✓ Model loaded successfully (alternative method)")
+    except Exception as e2:
+        print(f"✗ Failed to load model: {e2}")
+        raise
+
+try:
+    pipe.transformer.set_attn_processor(QwenDoubleStreamAttnProcessorFA3())
+    print("Flash Attention 3 Processor set successfully.")
+except Exception as e:
+    print(f"Warning: Could not set FA3 processor: {e}")
+
+EXAMPLES_CONFIG = [
+    {
+        "images": ["examples/1.jpg"],
+        "prompt": "cinematic polaroid dengan butiran halus, vignette halus, pencahayaan lembut, bingkai putih dengan foto tangan 'Fire-Edit' mempertahankan tekstur dan detail realistis.",
+    },
+    {
+        "images": ["examples/2.jpg"],
+        "prompt": "Ubah gambar menjadi gaya kartun berperut.",
+    },
+    {
+        "images": ["examples/3.jpeg"],
+        "prompt": "Ubah menjadi hitam putih.",
+    },
+    {
+        "images": ["examples/4.jpg", "examples/5.jpg"],
+        "prompt": "Ganti kacamata dengan kacamata baru dari gambar pertama.",
+    },
+    {
+        "images": ["examples/8.jpg", "examples/9.png"],
+        "prompt": "Ganti pakaian saat ini dengan pakaian dari gambar referensi. Pertahankan wajah, gaya rambut, pose tubuh, latar belakang, pencahayaan. Pastikan pakaian baru terlihat alami dengan tekstur kain yang realistis, bayangan, dan proporsi akurat.",
+    },
+    {
+        "images": ["examples/10.jpg", "examples/11.png"],
+        "prompt": "Ganti pakaian saat ini dengan pakaian dari gambar referensi. Pertahankan wajah, gaya rambut, pose tubuh, latar belakang, pencahayaan. Pastikan pakaian baru terlihat alami dengan tekstur kain yang realistis, bayangan, dan proporsi akurat.",
+    },
+]
+
+
+def make_thumb_b64(path, max_dim=220):
+    if not os.path.exists(path):
+        return ""
+    try:
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((max_dim, max_dim), LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=65)
+        return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}"
+    except Exception as e:
+        print(f"Thumbnail error for {path}: {e}")
+        return ""
+
+
+def encode_full_image(path):
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        ext = path.rsplit(".", 1)[-1].lower()
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+        return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+    except Exception as e:
+        print(f"Encode error for {path}: {e}")
+        return ""
+
+
+def build_example_cards_html():
+    cards = ""
+    for i, ex in enumerate(EXAMPLES_CONFIG):
+        thumbs_html = ""
+        for path in ex["images"]:
+            thumb = make_thumb_b64(path)
+            if thumb:
+                thumbs_html += f'<img src="{thumb}" alt="">'
+            else:
+                thumbs_html += '<div class="example-thumb-placeholder">Preview</div>'
+        n = len(ex["images"])
+        badge = f'{n} image{"s" if n > 1 else ""}'
+        prompt_short = html_lib.escape(ex["prompt"][:90])
+        if len(ex["prompt"]) > 90:
+            prompt_short += "..."
+        cards += f'''<div class="example-card" data-idx="{i}">
+            <div class="example-thumbs">{thumbs_html}</div>
+            <div class="example-meta"><span class="example-badge">{badge}</span></div>
+            <div class="example-prompt-text">{prompt_short}</div>
+        </div>'''
+    return cards
+
+
+def load_example_data(idx_str):
+    try:
+        idx = int(float(idx_str)) if idx_str and idx_str.strip() else -1
+    except (ValueError, TypeError):
+        idx = -1
+    if idx < 0 or idx >= len(EXAMPLES_CONFIG):
+        return json.dumps({"images": [], "prompt": "", "names": [], "status": "error"})
+    ex = EXAMPLES_CONFIG[idx]
+    b64_list, names = [], []
+    for path in ex["images"]:
+        b64 = encode_full_image(path)
+        if b64:
+            b64_list.append(b64)
+            names.append(os.path.basename(path))
+    return json.dumps({"images": b64_list, "prompt": ex["prompt"], "names": names, "status": "ok"})
+
+
+print("Building example thumbnails...")
+EXAMPLE_CARDS_HTML = build_example_cards_html()
+print(f"Built {len(EXAMPLES_CONFIG)} example cards.")
+
+
+def b64_to_pil_list(b64_json_str):
+    if not b64_json_str or b64_json_str.strip() in ("", "[]"):
+        return []
+    try:
+        b64_list = json.loads(b64_json_str)
+    except Exception:
+        return []
+    pil_images = []
+    for b64_str in b64_list:
+        if not b64_str or not isinstance(b64_str, str):
+            continue
+        try:
+            if b64_str.startswith("data:image"):
+                _, data = b64_str.split(",", 1)
+            else:
+                data = b64_str
+            image_data = base64.b64decode(data)
+            pil_images.append(Image.open(BytesIO(image_data)).convert("RGB"))
+        except Exception as e:
+            print(f"Error decoding image: {e}")
+    return pil_images
+
+
+def update_dimensions_on_upload(image):
+    if image is None:
+        return 1024, 1024
+    w, h = image.size
+    if w > h:
+        nw = 1024
+        nh = int(nw * h / w)
+    else:
+        nh = 1024
+        nw = int(nh * w / h)
+    return (nw // 8) * 8, (nh // 8) * 8
+
+
+@spaces.GPU
+def infer(images_b64_json, prompt, seed, randomize_seed, guidance_scale, steps, progress=gr.Progress(track_tqdm=True)):
+    gc.collect()
+    torch.cuda.empty_cache()
+    pil_images = b64_to_pil_list(images_b64_json)
+    if not pil_images:
+        raise gr.Error("Silakan unggah minimal satu gambar untuk diedit.")
+    if not prompt or prompt.strip() == "":
+        raise gr.Error("Silakan masukkan instruksi edit.")
+    if randomize_seed:
+        seed = random.randint(0, MAX_SEED)
+    generator = torch.Generator(device=device).manual_seed(seed)
+    negative_prompt = "worst quality, low quality, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, jpeg artifacts, signature, watermark, username, blurry"
+    width, height = update_dimensions_on_upload(pil_images[0])
+    try:
+        result_image = pipe(
+            image=pil_images, prompt=prompt, negative_prompt=negative_prompt,
+            height=height, width=width, num_inference_steps=steps,
+            generator=generator, true_cfg_scale=guidance_scale,
+        ).images[0]
+        return result_image, seed
+    except Exception as e:
+        raise e
+    finally:
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+css = r"""
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body,.gradio-container{
+    background:#0f0f13!important;font-family:'Inter',system-ui,-apple-system,sans-serif!important;
+    font-size:14px!important;color:#e4e4e7!important;min-height:100vh;
+}
+.dark body,.dark .gradio-container{background:#0f0f13!important;color:#e4e4e7!important}
+footer{display:none!important}
+.hidden-input{display:none!important;height:0!important;overflow:hidden!important;margin:0!important;padding:0!important}
+
+#example-load-btn{
+    position:absolute!important;left:-9999px!important;top:-9999px!important;
+    width:1px!important;height:1px!important;opacity:0.01!important;
+    pointer-events:none!important;overflow:hidden!important;
+}
+#gradio-run-btn{
+    position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;
+    opacity:0.01;pointer-events:none;overflow:hidden;
+}
+
+.app-shell{
+    background:#18181b;border:1px solid #27272a;border-radius:16px;
+    margin:12px auto;max-width:1400px;overflow:hidden;
+    box-shadow:0 25px 50px -12px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.03);
+}
+.app-header{
+    background:linear-gradient(135deg,#18181b,#1e1e24);border-bottom:1px solid #27272a;
+    padding:14px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;
+}
+.app-header-left{display:flex;align-items:center;gap:12px}
+.app-logo{
+    width:36px;height:36px;background:linear-gradient(135deg,#1E90FF,#47A3FF,#7CB8FF);
+    border-radius:10px;display:flex;align-items:center;justify-content:center;
+    box-shadow:0 4px 12px rgba(30,144,255,.35);
+}
+.app-logo svg{width:20px;height:20px;fill:#fff;flex-shrink:0}
+.app-title{
+    font-size:18px;font-weight:700;background:linear-gradient(135deg,#e4e4e7,#a1a1aa);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-.3px;
+}
+.app-badge{
+    font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;
+    background:rgba(30,144,255,.15);color:#47A3FF;border:1px solid rgba(30,144,255,.25);letter-spacing:.3px;
+}
+.app-badge.fast{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.25)}
+
+.app-toolbar{
+    background:#18181b;border-bottom:1px solid #27272a;padding:8px 16px;
+    display:flex;gap:4px;align-items:center;flex-wrap:wrap;
+}
+.tb-sep{width:1px;height:28px;background:#27272a;margin:0 8px}
+.modern-tb-btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:6px;
+    min-width:32px;height:34px;background:transparent;border:1px solid transparent;
+    border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;padding:0 12px;
+    font-family:'Inter',sans-serif;color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;
+    transition:all .15s ease;
+}
+.modern-tb-btn:hover{background:rgba(30,144,255,.15);border-color:rgba(30,144,255,.3)}
+.modern-tb-btn:active,.modern-tb-btn.active{background:rgba(30,144,255,.25);border-color:rgba(30,144,255,.45)}
+.modern-tb-btn .tb-label{font-size:13px;color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;font-weight:600}
+.modern-tb-btn .tb-svg{width:15px;height:15px;flex-shrink:0;color:#ffffff!important}
+.modern-tb-btn .tb-svg,
+.modern-tb-btn .tb-svg *{stroke:#ffffff!important;fill:none!important}
+.tb-info{font-family:'JetBrains Mono',monospace;font-size:12px;color:#71717a;padding:0 8px;display:flex;align-items:center}
+
+body:not(.dark) .modern-tb-btn,body:not(.dark) .modern-tb-btn *{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important}
+body:not(.dark) .modern-tb-btn .tb-svg,body:not(.dark) .modern-tb-btn .tb-svg *{stroke:#ffffff!important}
+.dark .modern-tb-btn,.dark .modern-tb-btn *{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important}
+.dark .modern-tb-btn .tb-svg,.dark .modern-tb-btn .tb-svg *{stroke:#ffffff!important}
+.gradio-container .modern-tb-btn,.gradio-container .modern-tb-btn *{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important}
+.gradio-container .modern-tb-btn .tb-svg,.gradio-container .modern-tb-btn .tb-svg *{stroke:#ffffff!important}
+
+.app-main-row{display:flex;gap:0;flex:1;overflow:hidden}
+.app-main-left{flex:1;display:flex;flex-direction:column;min-width:0;border-right:1px solid #27272a}
+.app-main-right{width:420px;display:flex;flex-direction:column;flex-shrink:0;background:#18181b}
+
+#gallery-drop-zone{position:relative;background:#09090b;min-height:440px;overflow:auto}
+#gallery-drop-zone.drag-over{outline:2px solid #1E90FF;outline-offset:-2px;background:rgba(30,144,255,.04)}
+
+.upload-prompt-modern{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:20}
+.upload-click-area{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    cursor:pointer;padding:36px 52px;border:2px dashed #3f3f46;border-radius:16px;
+    background:rgba(30,144,255,.03);transition:all .2s ease;gap:8px;
+}
+.upload-click-area:hover{background:rgba(30,144,255,.08);border-color:#1E90FF;transform:scale(1.03)}
+.upload-click-area:active{background:rgba(30,144,255,.12);transform:scale(.98)}
+.upload-click-area svg{width:80px;height:80px}
+.upload-main-text{color:#71717a;font-size:14px;font-weight:500;margin-top:4px}
+.upload-sub-text{color:#52525b;font-size:12px}
+
+.image-gallery-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
+    gap:12px;padding:16px;align-content:start;
+}
+.gallery-thumb{
+    position:relative;aspect-ratio:1;border-radius:10px;overflow:hidden;
+    cursor:pointer;border:2px solid #27272a;transition:all .2s ease;background:#18181b;
+}
+.gallery-thumb:hover{border-color:#3f3f46;transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.4)}
+.gallery-thumb.selected{border-color:#1E90FF!important;box-shadow:0 0 0 3px rgba(30,144,255,.2)}
+.gallery-thumb img{width:100%;height:100%;object-fit:cover}
+.thumb-badge{
+    position:absolute;top:6px;left:6px;background:#1E90FF;color:#fff;
+    padding:2px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;
+}
+.thumb-remove{
+    position:absolute;top:6px;right:6px;width:24px;height:24px;background:rgba(0,0,0,.75);
+    color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:50%;cursor:pointer;
+    display:none;align-items:center;justify-content:center;font-size:12px;transition:all .15s;line-height:1;
+}
+.gallery-thumb:hover .thumb-remove{display:flex}
+.thumb-remove:hover{background:#1E90FF;border-color:#1E90FF}
+.gallery-add-card{
+    aspect-ratio:1;border-radius:10px;border:2px dashed #3f3f46;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    cursor:pointer;transition:all .2s ease;background:rgba(30,144,255,.03);gap:4px;
+}
+.gallery-add-card:hover{border-color:#1E90FF;background:rgba(30,144,255,.08)}
+.gallery-add-card .add-icon{font-size:28px;color:#71717a;font-weight:300}
+.gallery-add-card .add-text{font-size:12px;color:#71717a;font-weight:500}
+
+.hint-bar{
+    background:rgba(30,144,255,.06);border-top:1px solid #27272a;border-bottom:1px solid #27272a;
+    padding:10px 20px;font-size:13px;color:#a1a1aa;line-height:1.7;
+}
+.hint-bar b{color:#7CB8FF;font-weight:600}
+.hint-bar kbd{
+    display:inline-block;padding:1px 6px;background:#27272a;border:1px solid #3f3f46;
+    border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#a1a1aa;
+}
+
+.suggestions-section{border-top:1px solid #27272a;padding:12px 16px}
+.suggestions-title,.examples-title{
+    font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;
+    letter-spacing:.8px;margin-bottom:10px;
+}
+.suggestions-wrap{display:flex;flex-wrap:wrap;gap:6px}
+.suggestion-chip{
+    display:inline-flex;align-items:center;gap:4px;padding:5px 12px;
+    background:rgba(30,144,255,.08);border:1px solid rgba(30,144,255,.2);border-radius:20px;
+    color:#7CB8FF;font-size:12px;font-weight:500;font-family:'Inter',sans-serif;
+    cursor:pointer;transition:all .15s;white-space:nowrap;
+}
+.suggestion-chip:hover{background:rgba(30,144,255,.15);border-color:rgba(30,144,255,.35);color:#47A3FF;transform:translateY(-1px)}
+
+.examples-section{border-top:1px solid #27272a;padding:12px 16px}
+.examples-scroll{display:flex;gap:10px;overflow-x:auto;padding-bottom:8px}
+.examples-scroll::-webkit-scrollbar{height:6px}
+.examples-scroll::-webkit-scrollbar-track{background:#09090b;border-radius:3px}
+.examples-scroll::-webkit-scrollbar-thumb{background:#27272a;border-radius:3px}
+.examples-scroll::-webkit-scrollbar-thumb:hover{background:#3f3f46}
+.example-card{
+    flex-shrink:0;width:210px;background:#09090b;border:1px solid #27272a;
+    border-radius:10px;overflow:hidden;cursor:pointer;transition:all .2s ease;
+}
+.example-card:hover{border-color:#1E90FF;transform:translateY(-2px);box-shadow:0 4px 12px rgba(30,144,255,.15)}
+.example-card.loading{opacity:.5;pointer-events:none}
+.example-thumbs{display:flex;height:110px;overflow:hidden;background:#18181b}
+.example-thumbs img{flex:1;object-fit:cover;min-width:0;border-bottom:1px solid #27272a}
+.example-thumb-placeholder{
+    flex:1;display:flex;align-items:center;justify-content:center;
+    background:#18181b;color:#3f3f46;font-size:11px;min-width:0;
+}
+.example-meta{padding:6px 10px;display:flex;align-items:center;gap:6px}
+.example-badge{
+    display:inline-flex;padding:2px 7px;background:rgba(30,144,255,.1);border-radius:4px;
+    font-size:10px;font-weight:600;color:#47A3FF;font-family:'JetBrains Mono',monospace;white-space:nowrap;
+}
+.example-prompt-text{
+    padding:0 10px 8px;font-size:11px;color:#a1a1aa;line-height:1.4;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+
+.panel-card{border-bottom:1px solid #27272a}
+.panel-card-title{
+    padding:12px 20px;font-size:12px;font-weight:600;color:#71717a;
+    text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid rgba(39,39,42,.6);
+}
+.panel-card-body{padding:16px 20px;display:flex;flex-direction:column;gap:8px}
+.modern-label{font-size:13px;font-weight:500;color:#a1a1aa;margin-bottom:4px;display:block}
+.modern-textarea{
+    width:100%;background:#09090b;border:1px solid #27272a;border-radius:8px;
+    padding:10px 14px;font-family:'Inter',sans-serif;font-size:14px;color:#e4e4e7;
+    resize:vertical;outline:none;min-height:42px;transition:border-color .2s;
+}
+.modern-textarea:focus{border-color:#1E90FF;box-shadow:0 0 0 3px rgba(30,144,255,.15)}
+.modern-textarea::placeholder{color:#3f3f46}
+.modern-textarea.error-flash{
+    border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,.2)!important;animation:shake .4s ease;
+}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-4px)}40%,80%{transform:translateX(4px)}}
+
+.toast-notification{
+    position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-120%);
+    z-index:9999;padding:10px 24px;border-radius:10px;font-family:'Inter',sans-serif;
+    font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;
+    box-shadow:0 8px 24px rgba(0,0,0,.5);
+    transition:transform .35s cubic-bezier(.34,1.56,.64,1),opacity .35s ease;opacity:0;pointer-events:none;
+}
+.toast-notification.visible{transform:translateX(-50%) translateY(0);opacity:1;pointer-events:auto}
+.toast-notification.error{background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;border:1px solid rgba(255,255,255,.15)}
+.toast-notification.warning{background:linear-gradient(135deg,#d97706,#b45309);color:#fff;border:1px solid rgba(255,255,255,.15)}
+.toast-notification.info{background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;border:1px solid rgba(255,255,255,.15)}
+.toast-notification .toast-icon{font-size:16px;line-height:1}
+.toast-notification .toast-text{line-height:1.3}
+
+.btn-run{
+    display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
+    background:linear-gradient(135deg,#1E90FF,#1873CC);border:none;border-radius:10px;
+    padding:12px 24px;cursor:pointer;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;
+    color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;transition:all .2s ease;letter-spacing:-.2px;
+    box-shadow:0 4px 16px rgba(30,144,255,.3),inset 0 1px 0 rgba(255,255,255,.1);
+}
+.btn-run:hover{
+    background:linear-gradient(135deg,#47A3FF,#1E90FF);transform:translateY(-1px);
+    box-shadow:0 6px 24px rgba(30,144,255,.45),inset 0 1px 0 rgba(255,255,255,.15);
+}
+.btn-run:active{transform:translateY(0);box-shadow:0 2px 8px rgba(30,144,255,.3)}
+.btn-run svg{width:18px;height:18px;fill:#ffffff!important}
+.btn-run svg path{fill:#ffffff!important}
+#custom-run-btn,#custom-run-btn *,#custom-run-btn span,#custom-run-btn svg,
+#custom-run-btn svg path,#run-btn-label,.btn-run,.btn-run *{
+    color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;fill:#ffffff!important;
+}
+body:not(.dark) .btn-run,body:not(.dark) .btn-run *,body:not(.dark) #custom-run-btn,
+body:not(.dark) #custom-run-btn *{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;fill:#ffffff!important}
+.dark .btn-run,.dark .btn-run *,.dark #custom-run-btn,.dark #custom-run-btn *{
+    color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;fill:#ffffff!important;
+}
+.gradio-container .btn-run,.gradio-container .btn-run *,.gradio-container #custom-run-btn,
+.gradio-container #custom-run-btn *{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;fill:#ffffff!important}
+
+.output-frame{border-bottom:1px solid #27272a;display:flex;flex-direction:column;position:relative}
+.output-frame .out-title{
+    padding:10px 20px;font-size:13px;font-weight:700;color:#ffffff!important;
+    -webkit-text-fill-color:#ffffff!important;text-transform:uppercase;letter-spacing:.8px;
+    border-bottom:1px solid rgba(39,39,42,.6);display:flex;align-items:center;justify-content:space-between;
+}
+.output-frame .out-title span{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important}
+.output-frame .out-body{
+    flex:1;background:#09090b;display:flex;align-items:center;justify-content:center;
+    overflow:hidden;min-height:240px;position:relative;
+}
+.output-frame .out-body img{max-width:100%;max-height:460px;image-rendering:auto}
+.output-frame .out-placeholder{color:#3f3f46;font-size:13px;text-align:center;padding:20px}
+.out-download-btn{
+    display:none;align-items:center;justify-content:center;background:rgba(30,144,255,.1);
+    border:1px solid rgba(30,144,255,.2);border-radius:6px;cursor:pointer;padding:3px 10px;
+    font-size:11px;font-weight:500;color:#7CB8FF!important;gap:4px;height:24px;transition:all .15s;
+}
+.out-download-btn:hover{background:rgba(30,144,255,.2);border-color:rgba(30,144,255,.35);color:#ffffff!important}
+.out-download-btn.visible{display:inline-flex}
+.out-download-btn svg{width:12px;height:12px;fill:#7CB8FF}
+
+.modern-loader{
+    display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(9,9,11,.92);
+    z-index:15;flex-direction:column;align-items:center;justify-content:center;gap:16px;backdrop-filter:blur(4px);
+}
+.modern-loader.active{display:flex}
+.modern-loader .loader-spinner{
+    width:36px;height:36px;border:3px solid #27272a;border-top-color:#1E90FF;
+    border-radius:50%;animation:spin .8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.modern-loader .loader-text{font-size:13px;color:#a1a1aa;font-weight:500}
+.loader-bar-track{width:200px;height:4px;background:#27272a;border-radius:2px;overflow:hidden}
+.loader-bar-fill{
+    height:100%;background:linear-gradient(90deg,#1E90FF,#47A3FF,#1E90FF);
+    background-size:200% 100%;animation:shimmer 1.5s ease-in-out infinite;border-radius:2px;
+}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+.settings-group{border:1px solid #27272a;border-radius:10px;margin:12px 16px;padding:0;overflow:hidden}
+.settings-group-title{
+    font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;letter-spacing:.8px;
+    padding:10px 16px;border-bottom:1px solid #27272a;background:rgba(24,24,27,.5);
+}
+.settings-group-body{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.slider-row{display:flex;align-items:center;gap:10px;min-height:28px}
+.slider-row label{font-size:13px;font-weight:500;color:#a1a1aa;min-width:72px;flex-shrink:0}
+.slider-row input[type="range"]{
+    flex:1;-webkit-appearance:none;appearance:none;height:6px;background:#27272a;
+    border-radius:3px;outline:none;min-width:0;
+}
+.slider-row input[type="range"]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:16px;height:16px;background:linear-gradient(135deg,#1E90FF,#1873CC);
+    border-radius:50%;cursor:pointer;box-shadow:0 2px 6px rgba(30,144,255,.4);transition:transform .15s;
+}
+.slider-row input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.2)}
+.slider-row input[type="range"]::-moz-range-thumb{
+    width:16px;height:16px;background:linear-gradient(135deg,#1E90FF,#1873CC);
+    border-radius:50%;cursor:pointer;border:none;box-shadow:0 2px 6px rgba(30,144,255,.4);
+}
+.slider-row .slider-val{
+    min-width:52px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px;
+    font-weight:500;padding:3px 8px;background:#09090b;border:1px solid #27272a;
+    border-radius:6px;color:#a1a1aa;flex-shrink:0;
+}
+.checkbox-row{display:flex;align-items:center;gap:8px;font-size:13px;color:#a1a1aa}
+.checkbox-row input[type="checkbox"]{accent-color:#1E90FF;width:16px;height:16px;cursor:pointer}
+.checkbox-row label{color:#a1a1aa;font-size:13px;cursor:pointer}
+
+.app-statusbar{
+    background:#18181b;border-top:1px solid #27272a;padding:6px 20px;
+    display:flex;gap:12px;height:34px;align-items:center;font-size:12px;
+}
+.app-statusbar .sb-section{
+    padding:0 12px;flex:1;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;
+    font-size:12px;color:#52525b;overflow:hidden;white-space:nowrap;
+}
+.app-statusbar .sb-section.sb-fixed{
+    flex:0 0 auto;min-width:90px;text-align:center;justify-content:center;
+    padding:3px 12px;background:rgba(30,144,255,.08);border-radius:6px;color:#47A3FF;font-weight:500;
+}
+
+.exp-note{padding:10px 20px;font-size:12px;color:#52525b;border-top:1px solid #27272a;text-align:center}
+.exp-note a{color:#47A3FF;text-decoration:none}
+.exp-note a:hover{text-decoration:underline}
+
+.dark .app-shell{background:#18181b}
+.dark .upload-prompt-modern{background:transparent}
+.dark .panel-card{background:#18181b}
+.dark .settings-group{background:#18181b}
+.dark .output-frame .out-title{color:#ffffff!important}
+.dark .output-frame .out-title span{color:#ffffff!important}
+.dark .out-download-btn{color:#7CB8FF!important}
+.dark .out-download-btn:hover{color:#ffffff!important}
+
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:#09090b}
+::-webkit-scrollbar-thumb{background:#27272a;border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:#3f3f46}
+
+/* Guide Modal Styles */
+.guide-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.8);z-index:9998;align-items:center;justify-content:center}
+.guide-modal.active{display:flex}
+.guide-content{background:#18181b;border:1px solid #27272a;border-radius:12px;max-width:600px;max-height:80vh;overflow-y:auto;padding:32px;box-shadow:0 25px 50px -12px rgba(0,0,0,.9)}
+.guide-title{font-size:24px;font-weight:700;color:#e4e4e7;margin-bottom:20px}
+.guide-section{margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid #27272a}
+.guide-section:last-child{border-bottom:none;margin-bottom:0}
+.guide-section-title{font-size:14px;font-weight:600;color:#7CB8FF;text-transform:uppercase;margin-bottom:8px;letter-spacing:.5px}
+.guide-section-text{font-size:13px;color:#a1a1aa;line-height:1.8;margin-bottom:8px}
+.guide-section-text b{color:#e4e4e7}
+.guide-step{display:flex;gap:12px;margin:12px 0}
+.guide-step-num{min-width:28px;width:28px;height:28px;background:#1E90FF;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;font-size:12px;flex-shrink:0}
+.guide-step-content{flex:1}
+.guide-close{position:absolute;top:20px;right:20px;width:32px;height:32px;background:transparent;border:1px solid #27272a;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#a1a1aa;font-size:18px;transition:all .15s}
+.guide-close:hover{border-color:#1E90FF;color:#1E90FF;background:rgba(30,144,255,.1)}
+.guide-tip{background:rgba(30,144,255,.08);border-left:3px solid #1E90FF;padding:12px 14px;border-radius:6px;margin:12px 0;font-size:12px;color:#a1a1aa}
+
+@media(max-width:840px){
+    .app-main-row{flex-direction:column}
+    .app-main-right{width:100%}
+    .app-main-left{border-right:none;border-bottom:1px solid #27272a}
+    .guide-content{max-width:90vw;padding:20px}
+}
+"""
+
+gallery_js = r"""
+() => {
+function init() {
+    if (window.__fireRedInitDone) return;
+
+    const galleryGrid   = document.getElementById('image-gallery-grid');
+    const dropZone      = document.getElementById('gallery-drop-zone');
+    const uploadPrompt  = document.getElementById('upload-prompt');
+    const uploadClick   = document.getElementById('upload-click-area');
+    const fileInput     = document.getElementById('custom-file-input');
+    const btnUpload     = document.getElementById('tb-upload');
+    const btnRemove     = document.getElementById('tb-remove');
+    const btnClear      = document.getElementById('tb-clear');
+    const promptInput   = document.getElementById('custom-prompt-input');
+    const runBtnEl      = document.getElementById('custom-run-btn');
+    const imgCountTb    = document.getElementById('tb-image-count');
+    const imgCountSb    = document.getElementById('sb-image-count');
+
+    if (!galleryGrid || !fileInput || !dropZone) {
+        setTimeout(init, 250);
+        return;
+    }
+
+    window.__fireRedInitDone = true;
+
+    let images = [];
+    window.__uploadedImages = images;
+    let selectedIdx = -1;
+    let toastTimer = null;
+
+    function showToast(message, type) {
+        let toast = document.getElementById('app-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'app-toast';
+            toast.className = 'toast-notification';
+            toast.innerHTML = '<span class="toast-icon"></span><span class="toast-text"></span>';
+            document.body.appendChild(toast);
+        }
+        const icon = toast.querySelector('.toast-icon');
+        const text = toast.querySelector('.toast-text');
+        toast.className = 'toast-notification ' + (type || 'error');
+        if (type === 'warning') icon.textContent = '\u26A0';
+        else if (type === 'info') icon.textContent = '\u2139';
+        else icon.textContent = '\u2717';
+        text.textContent = message;
+        if (toastTimer) clearTimeout(toastTimer);
+        void toast.offsetWidth;
+        toast.classList.add('visible');
+        toastTimer = setTimeout(() => toast.classList.remove('visible'), 3500);
+    }
+    window.__showToast = showToast;
+
+    function flashPromptError() {
+        if (!promptInput) return;
+        promptInput.classList.add('error-flash');
+        promptInput.focus();
+        setTimeout(() => promptInput.classList.remove('error-flash'), 800);
+    }
+
+    function setGradioValue(containerId, value) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        container.querySelectorAll('input, textarea').forEach(el => {
+            if (el.type === 'file' || el.type === 'range' || el.type === 'checkbox') return;
+            const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            const ns = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (ns && ns.set) {
+                ns.set.call(el, value);
+                el.dispatchEvent(new Event('input',  {bubbles:true, composed:true}));
+                el.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
+            }
+        });
+    }
+    window.__setGradioValue = setGradioValue;
+
+    function syncImagesToGradio() {
+        window.__uploadedImages = images;
+        const b64Array = images.map(img => img.b64);
+        setGradioValue('hidden-images-b64', JSON.stringify(b64Array));
+        updateCounts();
+    }
+
+    function syncPromptToGradio() {
+        if (promptInput) setGradioValue('prompt-gradio-input', promptInput.value);
+    }
+
+    function updateCounts() {
+        const n = images.length;
+        const txt = n > 0 ? n + ' image' + (n > 1 ? 's' : '') : 'No images';
+        if (imgCountTb) imgCountTb.textContent = txt;
+        if (imgCountSb) imgCountSb.textContent = n > 0 ? txt + ' uploaded' : 'No images uploaded';
+    }
+
+    function addImage(b64, name) {
+        images.push({id: Date.now() + Math.random(), b64: b64, name: name});
+        renderGallery();
+        syncImagesToGradio();
+    }
+    window.__addImage = addImage;
+
+    function removeImage(idx) {
+        images.splice(idx, 1);
+        if (selectedIdx === idx) selectedIdx = -1;
+        else if (selectedIdx > idx) selectedIdx--;
+        renderGallery();
+        syncImagesToGradio();
+    }
+
+    function clearAll() {
+        images = [];
+        window.__uploadedImages = images;
+        selectedIdx = -1;
+        renderGallery();
+        syncImagesToGradio();
+    }
+    window.__clearAll = clearAll;
+
+    function selectImage(idx) {
+        selectedIdx = (selectedIdx === idx) ? -1 : idx;
+        renderGallery();
+    }
+
+    function renderGallery() {
+        if (images.length === 0) {
+            galleryGrid.innerHTML = '';
+            galleryGrid.style.display = 'none';
+            if (uploadPrompt) uploadPrompt.style.display = '';
+            return;
+        }
+        if (uploadPrompt) uploadPrompt.style.display = 'none';
+        galleryGrid.style.display = 'grid';
+
+        let html = '';
+        images.forEach((img, i) => {
+            const sel = i === selectedIdx ? ' selected' : '';
+            html += '<div class="gallery-thumb' + sel + '" data-idx="' + i + '">'
+                  + '<img src="' + img.b64 + '" alt="' + (img.name||'image') + '">'
+                  + '<span class="thumb-badge">#' + (i+1) + '</span>'
+                  + '<button class="thumb-remove" data-remove="' + i + '">\u2715</button>'
+                  + '</div>';
+        });
+        html += '<div class="gallery-add-card" id="gallery-add-card">'
+              + '<span class="add-icon">+</span>'
+              + '<span class="add-text">Add</span>'
+              + '</div>';
+        galleryGrid.innerHTML = html;
+
+        galleryGrid.querySelectorAll('.gallery-thumb').forEach(thumb => {
+            thumb.addEventListener('click', (e) => {
+                if (e.target.closest('.thumb-remove')) return;
+                selectImage(parseInt(thumb.dataset.idx));
+            });
+        });
+        galleryGrid.querySelectorAll('.thumb-remove').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                removeImage(parseInt(btn.dataset.remove));
+            });
+        });
+        const addCard = document.getElementById('gallery-add-card');
+        if (addCard) addCard.addEventListener('click', () => fileInput.click());
+    }
+
+    function processFiles(files) {
+        Array.from(files).forEach(file => {
+            if (!file.type.startsWith('image/')) return;
+            const reader = new FileReader();
+            reader.onload = (e) => addImage(e.target.result, file.name);
+            reader.readAsDataURL(file);
+        });
+    }
+
+    fileInput.addEventListener('change', (e) => { processFiles(e.target.files); e.target.value = ''; });
+    if (uploadClick) uploadClick.addEventListener('click', () => fileInput.click());
+    if (btnUpload) btnUpload.addEventListener('click', () => fileInput.click());
+    if (btnRemove) btnRemove.addEventListener('click', () => {
+        if (selectedIdx >= 0 && selectedIdx < images.length) removeImage(selectedIdx);
+    });
+    if (btnClear) btnClear.addEventListener('click', clearAll);
+
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); dropZone.classList.remove('drag-over'); });
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault(); dropZone.classList.remove('drag-over');
+        if (e.dataTransfer.files.length) processFiles(e.dataTransfer.files);
+    });
+
+    if (promptInput) promptInput.addEventListener('input', syncPromptToGradio);
+
+    window.__setPrompt = function(text) {
+        if (promptInput) { promptInput.value = text; syncPromptToGradio(); }
+    };
+
+    document.querySelectorAll('.example-card[data-idx]').forEach(card => {
+        card.addEventListener('click', () => {
+            const idx = card.getAttribute('data-idx');
+            document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+            card.classList.add('loading');
+            showToast('Memuat contoh...', 'info');
+
+            setGradioValue('example-result-data', '');
+            setGradioValue('example-idx-input', idx);
+
+            setTimeout(() => {
+                const btn = document.getElementById('example-load-btn');
+                if (btn) {
+                    const b = btn.querySelector('button');
+                    if (b) b.click(); else btn.click();
+                }
+            }, 150);
+
+            setTimeout(() => card.classList.remove('loading'), 12000);
+        });
+    });
+
+    function syncSlider(customId, gradioId) {
+        const slider = document.getElementById(customId);
+        const valSpan = document.getElementById(customId + '-val');
+        if (!slider) return;
+        slider.addEventListener('input', () => {
+            if (valSpan) valSpan.textContent = slider.value;
+            const container = document.getElementById(gradioId);
+            if (!container) return;
+            container.querySelectorAll('input[type="range"],input[type="number"]').forEach(el => {
+                const ns = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                if (ns && ns.set) {
+                    ns.set.call(el, slider.value);
+                    el.dispatchEvent(new Event('input',  {bubbles:true, composed:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
+                }
+            });
+        });
+    }
+    syncSlider('custom-seed', 'gradio-seed');
+    syncSlider('custom-guidance', 'gradio-guidance');
+    syncSlider('custom-steps', 'gradio-steps');
+
+    const randCheck = document.getElementById('custom-randomize');
+    if (randCheck) {
+        randCheck.addEventListener('change', () => {
+            const container = document.getElementById('gradio-randomize');
+            if (!container) return;
+            const cb = container.querySelector('input[type="checkbox"]');
+            if (cb && cb.checked !== randCheck.checked) cb.click();
+        });
+    }
+
+    function showLoader() {
+        const l = document.getElementById('output-loader');
+        if (l) l.classList.add('active');
+        const sb = document.querySelector('.sb-fixed');
+        if (sb) sb.textContent = 'Memproses...';
+    }
+    function hideLoader() {
+        const l = document.getElementById('output-loader');
+        if (l) l.classList.remove('active');
+        const sb = document.querySelector('.sb-fixed');
+        if (sb) sb.textContent = 'Selesai';
+    }
+    window.__showLoader = showLoader;
+    window.__hideLoader = hideLoader;
+
+    function validateBeforeRun() {
+        const promptVal = promptInput ? promptInput.value.trim() : '';
+        const hasImages = images.length > 0;
+        if (!hasImages && !promptVal) { showToast('Silakan unggah gambar dan masukkan instruksi', 'error'); flashPromptError(); return false; }
+        if (!hasImages) { showToast('Silakan unggah minimal satu gambar', 'error'); return false; }
+        if (!promptVal) { showToast('Silakan masukkan instruksi edit', 'warning'); flashPromptError(); return false; }
+        return true;
+    }
+
+    window.__clickGradioRunBtn = function() {
+        if (!validateBeforeRun()) return;
+        syncPromptToGradio(); syncImagesToGradio(); showLoader();
+        setTimeout(() => {
+            const gradioBtn = document.getElementById('gradio-run-btn');
+            if (!gradioBtn) return;
+            const btn = gradioBtn.querySelector('button');
+            if (btn) btn.click(); else gradioBtn.click();
+        }, 200);
+    };
+
+    if (runBtnEl) runBtnEl.addEventListener('click', () => window.__clickGradioRunBtn());
+
+    // Guide toggle button handler
+    const guideBtn = document.getElementById('toggle-guide-btn');
+    const guideModal = document.getElementById('guide-modal');
+    if (guideBtn && guideModal) {
+        guideBtn.addEventListener('click', () => {
+            guideModal.classList.toggle('active');
+        });
+    }
+    // Close guide when clicking outside
+    if (guideModal) {
+        guideModal.addEventListener('click', (e) => {
+            if (e.target === guideModal) guideModal.classList.remove('active');
+        });
+    }
+
+    renderGallery();
+    updateCounts();
+}
+init();
+}
+"""
+
+wire_outputs_js = r"""
+() => {
+function watchOutputs() {
+    const resultContainer = document.getElementById('gradio-result');
+    const outBody  = document.getElementById('output-image-container');
+    const outPh    = document.getElementById('output-placeholder');
+    const dlBtn    = document.getElementById('dl-btn-output');
+
+    if (!resultContainer || !outBody) { setTimeout(watchOutputs, 500); return; }
+
+    if (dlBtn) {
+        dlBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const img = outBody.querySelector('img.modern-out-img');
+            if (img && img.src) {
+                const a = document.createElement('a');
+                a.href = img.src; a.download = 'firered_output.png';
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            }
+        });
+    }
+
+    function syncImage() {
+        const resultImg = resultContainer.querySelector('img');
+        if (resultImg && resultImg.src) {
+            if (outPh) outPh.style.display = 'none';
+            let existing = outBody.querySelector('img.modern-out-img');
+            if (!existing) { existing = document.createElement('img'); existing.className = 'modern-out-img'; outBody.appendChild(existing); }
+            if (existing.src !== resultImg.src) {
+                existing.src = resultImg.src;
+                if (dlBtn) dlBtn.classList.add('visible');
+                if (window.__hideLoader) window.__hideLoader();
+            }
+        }
+    }
+    const observer = new MutationObserver(syncImage);
+    observer.observe(resultContainer, {childList:true, subtree:true, attributes:true, attributeFilter:['src']});
+    setInterval(syncImage, 800);
+}
+watchOutputs();
+
+function watchSeed() {
+    const seedContainer = document.getElementById('gradio-seed');
+    const seedSlider = document.getElementById('custom-seed');
+    const seedVal = document.getElementById('custom-seed-val');
+    if (!seedContainer || !seedSlider) { setTimeout(watchSeed, 500); return; }
+    function sync() {
+        const el = seedContainer.querySelector('input[type="range"],input[type="number"]');
+        if (el && el.value) { seedSlider.value = el.value; if (seedVal) seedVal.textContent = el.value; }
+    }
+    const obs = new MutationObserver(sync);
+    obs.observe(seedContainer, {childList:true, subtree:true, attributes:true, attributeFilter:['value']});
+    setInterval(sync, 1000);
+}
+watchSeed();
+
+function watchExampleResults() {
+    const container = document.getElementById('example-result-data');
+    if (!container) { setTimeout(watchExampleResults, 500); return; }
+
+    let lastProcessed = '';
+
+    function checkResult() {
+        const el = container.querySelector('textarea') || container.querySelector('input');
+        if (!el) return;
+        const val = el.value;
+        if (!val || val === lastProcessed || val.length < 20) return;
+
+        try {
+            const data = JSON.parse(val);
+            if (data.status === 'ok' && data.images && data.images.length > 0) {
+                lastProcessed = val;
+
+                if (window.__clearAll) window.__clearAll();
+                if (window.__setPrompt && data.prompt) window.__setPrompt(data.prompt);
+
+                data.images.forEach((b64, i) => {
+                    if (b64 && window.__addImage) {
+                        const name = (data.names && data.names[i]) ? data.names[i] : ('example_' + (i+1) + '.jpg');
+                        window.__addImage(b64, name);
+                    }
+                });
+
+                document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+                if (window.__showToast) window.__showToast('Contoh dimuat — ' + data.images.length + ' gambar', 'info');
+            } else if (data.status === 'error') {
+                document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+                if (window.__showToast) window.__showToast('Tidak dapat memuat gambar contoh', 'error');
+            }
+        } catch(e) {
+            console.error('Example parse error:', e);
+        }
+    }
+
+    const obs = new MutationObserver(checkResult);
+    obs.observe(container, {childList:true, subtree:true, characterData:true, attributes:true});
+    setInterval(checkResult, 500);
+}
+watchExampleResults();
+}
+"""
+
+DOWNLOAD_SVG = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 16l-5-5h3V4h4v7h3l-5 5z"/><path d="M20 18H4v2h16v-2z"/></svg>'
+
+UPLOAD_SVG = '<svg class="tb-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>'
+
+REMOVE_SVG = '<svg class="tb-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
+
+CLEAR_SVG = '<svg class="tb-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>'
+
+FIRE_LOGO_SVG = '<svg viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg"><path d="M12 23c-3.6 0-8-2.69-8-7.5 0-3.5 3-6.5 4.5-8 .27-.27.75-.08.75.28v2.44c0 .42.5.63.72.28C12.28 7.5 13 3 13 1c0-.42.48-.64.8-.35C18 4.5 20 9 20 12c0 5.5-3.5 11-8 11z"/></svg>'
+
+with gr.Blocks() as demo:
+
+    hidden_images_b64 = gr.Textbox(value="[]", elem_id="hidden-images-b64", elem_classes="hidden-input", container=False)
+    prompt = gr.Textbox(value="", elem_id="prompt-gradio-input", elem_classes="hidden-input", container=False)
+    seed = gr.Slider(minimum=0, maximum=MAX_SEED, step=1, value=0, elem_id="gradio-seed", elem_classes="hidden-input", container=False)
+    randomize_seed = gr.Checkbox(value=True, elem_id="gradio-randomize", elem_classes="hidden-input", container=False)
+    guidance_scale = gr.Slider(minimum=1.0, maximum=10.0, step=0.1, value=1.0, elem_id="gradio-guidance", elem_classes="hidden-input", container=False)
+    steps = gr.Slider(minimum=1, maximum=50, step=1, value=4, elem_id="gradio-steps", elem_classes="hidden-input", container=False)
+    result = gr.Image(elem_id="gradio-result", elem_classes="hidden-input", container=False, format="png")
+
+    example_idx = gr.Textbox(value="", elem_id="example-idx-input", elem_classes="hidden-input", container=False)
+    example_result = gr.Textbox(value="", elem_id="example-result-data", elem_classes="hidden-input", container=False)
+    example_load_btn = gr.Button("Load Example", elem_id="example-load-btn")
+
+    gr.HTML(f"""
+    <div class="app-shell">
+
+        <div class="app-header">
+            <div class="app-header-left">
+                <div class="app-logo">{FIRE_LOGO_SVG}</div>
+                <span class="app-title">Owi Edit</span>
+                <span class="app-badge">v1.1</span>
+                <span class="app-badge fast">Cepat 4-Step</span>
+            </div>
+            <div style="margin-left: auto;">
+                <button id="toggle-guide-btn" class="modern-tb-btn" title="Tampilkan/Sembunyikan Panduan" style="cursor: pointer;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    <span class="tb-label">Panduan</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="app-toolbar">
+            <button id="tb-upload" class="modern-tb-btn" title="Unggah gambar">
+                {UPLOAD_SVG}<span class="tb-label">Unggah</span>
+            </button>
+            <button id="tb-remove" class="modern-tb-btn" title="Hapus gambar terpilih">
+                {REMOVE_SVG}<span class="tb-label">Hapus</span>
+            </button>
+            <button id="tb-clear" class="modern-tb-btn" title="Hapus semua gambar">
+                {CLEAR_SVG}<span class="tb-label">Hapus Semua</span>
+            </button>
+            <div class="tb-sep"></div>
+            <span id="tb-image-count" class="tb-info">Tidak ada gambar</span>
+        </div>
+
+        <div class="app-main-row">
+            <div class="app-main-left">
+                <div id="gallery-drop-zone">
+                    <div id="upload-prompt" class="upload-prompt-modern">
+                        <div id="upload-click-area" class="upload-click-area">
+                            <svg viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <rect x="8" y="14" width="64" height="52" rx="6" fill="none" stroke="#1E90FF" stroke-width="2" stroke-dasharray="4 3"/>
+                                <polygon points="12,62 30,40 42,50 54,34 68,62" fill="rgba(30,144,255,0.15)" stroke="#1E90FF" stroke-width="1.5"/>
+                                <circle cx="28" cy="30" r="6" fill="rgba(30,144,255,0.2)" stroke="#1E90FF" stroke-width="1.5"/>
+                            </svg>
+                            <span class="upload-main-text">Klik atau seret gambar di sini</span>
+                            <span class="upload-sub-text">Mendukung multiple gambar untuk editing berbasis referensi dan manipulasi terpandu</span>
+                        </div>
+                    </div>
+                    <input id="custom-file-input" type="file" accept="image/*" multiple style="display:none;" />
+                    <div id="image-gallery-grid" class="image-gallery-grid" style="display:none;"></div>
+                </div>
+
+                <div class="hint-bar">
+                    <b>Unggah:</b> Klik atau seret untuk menambah gambar &nbsp;&middot;&nbsp;
+                    <b>Multi-gambar:</b> Unggah beberapa gambar untuk editing berbasis referensi &nbsp;&middot;&nbsp;
+                    <kbd>Hapus</kbd> menghapus yang dipilih &nbsp;&middot;&nbsp;
+                    <kbd>Hapus Semua</kbd> menghapus semuanya
+                </div>
+
+                <div class="suggestions-section">
+                    <div class="suggestions-title">Prompt Cepat</div>
+                    <div class="suggestions-wrap">
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah gambar menjadi gaya kartun dengan gaya dotted.')">Gaya Kartun</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah menjadi hitam putih.')">Hitam Putih</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Tambahkan pencahayaan sinematik dengan nada oranye hangat dan film grain.')">Sinematik</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah menjadi ilustrasi gaya anime.')">Gaya Anime</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Terapkan efek cat minyak dengan sapuan kuas yang terlihat.')">Cat Minyak</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Tingkatkan dan perbesar dengan lebih detail dan kejelasan.')">Tingkatkan</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah menjadi lukisan cat air dengan tepi lembut.')">Cat Air</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Tambahkan langit matahari terbenam yang dramatis dan pencahayaan hangat.')">Cahaya Matahari Terbenam</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah menjadi sketsa pensil terperinci dengan cross-hatching dan shading.')">Sketsa Pensil</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Terapkan gaya pop art dengan warna berani dan pola halftone.')">Seni Pop</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Terapkan tampilan film retro vintage dengan warna pudar dan light leaks.')">Retro Vintage</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Tambahkan efek cahaya neon dengan warna cerah pada latar belakang gelap.')">Cahaya Neon</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah menjadi gaya seni pixel dengan estetika retro 16-bit.')">Seni Pixel</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Sederhanakan menjadi ilustrasi minimalis dengan warna datar.')">Minimalis</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah menjadi gaya seni geometri 3D low poly.')">Low Poly 3D</button>
+                        <button class="suggestion-chip" onclick="window.__setPrompt('Ubah menjadi gaya komik dengan outline berani dan cel shading.')">Komik</button>
+                    </div>
+                </div>
+
+                <div class="examples-section">
+                    <div class="examples-title">Contoh Cepat</div>
+                    <div class="examples-scroll">
+                        {EXAMPLE_CARDS_HTML}
+                    </div>
+                </div>
+            </div>
+
+            <div class="app-main-right">
+                <div class="panel-card">
+                    <div class="panel-card-title">Instruksi Edit</div>
+                    <div class="panel-card-body">
+                        <label class="modern-label" for="custom-prompt-input">Pesan Instruksi</label>
+                        <textarea id="custom-prompt-input" class="modern-textarea" rows="3" placeholder="Mis: ubah ke anime, tingkatkan kualitas, ubah pencahayaan..."></textarea>
+                    </div>
+                </div>
+
+                <div style="padding:12px 20px;">
+                    <button id="custom-run-btn" class="btn-run">
+                        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 23c-3.6 0-8-2.69-8-7.5 0-3.5 3-6.5 4.5-8 .27-.27.75-.08.75.28v2.44c0 .42.5.63.72.28C12.28 7.5 13 3 13 1c0-.42.48-.64.8-.35C18 4.5 20 9 20 12c0 5.5-3.5 11-8 11z"/></svg>
+                        <span id="run-btn-label">Edit Gambar</span>
+                    </button>
+                </div>
+
+                <div class="output-frame" style="flex:1">
+                    <div class="out-title">
+                        <span>Hasil</span>
+                        <span id="dl-btn-output" class="out-download-btn" title="Unduh">
+                            {DOWNLOAD_SVG} Simpan
+                        </span>
+                    </div>
+                    <div class="out-body" id="output-image-container">
+                        <div class="modern-loader" id="output-loader">
+                            <div class="loader-spinner"></div>
+                            <div class="loader-text">Memproses gambar...</div>
+                            <div class="loader-bar-track"><div class="loader-bar-fill"></div></div>
+                        </div>
+                        <div class="out-placeholder" id="output-placeholder">Hasil akan tampil di sini</div>
+                    </div>
+                </div>
+
+                <div class="settings-group">
+                    <div class="settings-group-title">Pengaturan Lanjutan</div>
+                    <div class="settings-group-body">
+                        <div class="slider-row">
+                            <label>Seed</label>
+                            <input type="range" id="custom-seed" min="0" max="2147483647" step="1" value="0">
+                            <span class="slider-val" id="custom-seed-val">0</span>
+                        </div>
+                        <div class="checkbox-row">
+                            <input type="checkbox" id="custom-randomize" checked>
+                            <label for="custom-randomize">Random seed</label>
+                        </div>
+                        <div class="slider-row">
+                            <label>Bimbingan</label>
+                            <input type="range" id="custom-guidance" min="1" max="10" step="0.1" value="1.0">
+                            <span class="slider-val" id="custom-guidance-val">1.0</span>
+                        </div>
+                        <div class="slider-row">
+                            <label>Langkah</label>
+                            <input type="range" id="custom-steps" min="1" max="50" step="1" value="4">
+                            <span class="slider-val" id="custom-steps-val">4</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="exp-note">
+            Dibuat dengan ❤️ oleh <a href="https://github.com" target="_blank">Aing owi</a> | 
+            Model dari <a href="https://huggingface.co/FireRedTeam/FireRed-Image-Edit-1.1" target="_blank">FireRed-Image-Edit-1.1</a>
+            &middot; Lihat di <a href="https://github.com/PRITHIVSAKTHIUR/FireRed-Image-Edit-1.0-Fast" target="_blank">GitHub</a>
+        </div>
+
+        <div class="app-statusbar">
+            <div class="sb-section" id="sb-image-count">Tidak ada gambar yang diunggah</div>
+            <div class="sb-section sb-fixed">Siap</div>
+        </div>
+    </div>
+
+    <!-- Guide Modal -->
+    <div class="guide-modal" id="guide-modal">
+        <div class="guide-content">
+            <button class="guide-close" onclick="document.getElementById('guide-modal').classList.remove('active')">✕</button>
+            <div class="guide-title">📖 Panduan Penggunaan Owi Edit</div>
+            
+            <div class="guide-section">
+                <div class="guide-section-title">Langkah 1: Unggah Gambar</div>
+                <div class="guide-step">
+                    <div class="guide-step-num">1</div>
+                    <div class="guide-step-content">
+                        <div class="guide-section-text"><b>Klik atau seret</b> gambar ke area upload di sebelah kiri.</div>
+                        <div class="guide-section-text">Anda dapat mengunggah <b>satu atau lebih gambar</b> untuk editing berbasis referensi.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="guide-section">
+                <div class="guide-section-title">Langkah 2: Tulis Instruksi Edit</div>
+                <div class="guide-step">
+                    <div class="guide-step-num">2</div>
+                    <div class="guide-step-content">
+                        <div class="guide-section-text">Ketik instruksi edit Anda di kolom <b>"Pesan Instruksi"</b>.</div>
+                        <div class="guide-section-text">Contoh: "Ubah menjadi gaya anime", "Tingkatkan kualitas", "Ubah ke hitam putih"</div>
+                        <div class="guide-tip">💡 Gunakan tombol <b>Prompt Cepat</b> untuk inspirasi atau klik contoh yang ada.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="guide-section">
+                <div class="guide-section-title">Langkah 3: Sesuaikan Pengaturan (Opsional)</div>
+                <div class="guide-step">
+                    <div class="guide-step-num">3</div>
+                    <div class="guide-step-content">
+                        <div class="guide-section-text"><b>Pengaturan Lanjutan</b> memungkinkan kontrol lebih:</div>
+                        <div class="guide-section-text">• <b>Seed</b>: Untuk konsistensi hasil (gunakan angka sama untuk hasil yang sama)</div>
+                        <div class="guide-section-text">• <b>Bimbingan</b>: Seberapa ketat model mengikuti instruksi (1.0 = longgar, 10 = ketat)</div>
+                        <div class="guide-section-text">• <b>Langkah</b>: Jumlah iterasi (lebih banyak = lebih detail tapi lebih lambat)</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="guide-section">
+                <div class="guide-section-title">Langkah 4: Jalankan Edit</div>
+                <div class="guide-step">
+                    <div class="guide-step-num">4</div>
+                    <div class="guide-step-content">
+                        <div class="guide-section-text">Klik tombol <b>"Edit Gambar"</b> untuk memulai proses.</div>
+                        <div class="guide-section-text">Tunggu sampai hasilnya muncul di area "Hasil".</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="guide-section">
+                <div class="guide-section-title">Tips & Trik</div>
+                <div class="guide-section-text">✓ <b>Deskripsi detail</b> menghasilkan gambar yang lebih baik</div>
+                <div class="guide-section-text">✓ Gunakan <b>multiple gambar</b> sebagai referensi untuk hasil yang lebih konsisten</div>
+                <div class="guide-section-text">✓ Jika hasil tidak bagus, coba ubah seed atau instruksi</div>
+                <div class="guide-section-text">✓ Anda dapat <b>mengunduh hasil</b> dengan klik tombol "Simpan"</div>
+                <div class="guide-tip">💡 Contoh instruksi bagus: "Ubah menjadi lukisan minyak dengan sapuan kuas tebal" daripada "ubah gaya"</div>
+            </div>
+
+            <div class="guide-section">
+                <div class="guide-section-title">Fitur Toolbar</div>
+                <div class="guide-section-text"><b>Unggah</b>: Tambah gambar baru</div>
+                <div class="guide-section-text"><b>Hapus</b>: Hapus gambar yang dipilih</div>
+                <div class="guide-section-text"><b>Hapus Semua</b>: Hapus semua gambar</div>
+            </div>
+        </div>
+    </div>
+    """)
+
+    run_btn = gr.Button("Run", elem_id="gradio-run-btn")
+
+    demo.load(fn=None, js=gallery_js)
+    demo.load(fn=None, js=wire_outputs_js)
+
+    run_btn.click(
+        fn=infer,
+        inputs=[hidden_images_b64, prompt, seed, randomize_seed, guidance_scale, steps],
+        outputs=[result, seed],
+        js=r"""(imgs, p, s, rs, gs, st) => {
+            const images = window.__uploadedImages || [];
+            const b64Array = images.map(img => img.b64);
+            const imgsJson = JSON.stringify(b64Array);
+            const promptEl = document.getElementById('custom-prompt-input');
+            const promptVal = promptEl ? promptEl.value : p;
+            return [imgsJson, promptVal, s, rs, gs, st];
+        }""",
+    )
+
+    example_load_btn.click(
+        fn=load_example_data,
+        inputs=[example_idx],
+        outputs=[example_result],
+        queue=False,
+    )
+
+if __name__ == "__main__":
+    demo.queue(max_size=30).launch(
+        css=css,
+        mcp_server=True,
+        ssr_mode=False,
+        show_error=True,
+        allowed_paths=["examples"],
+    )
