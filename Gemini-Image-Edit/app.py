@@ -15,10 +15,10 @@ def save_binary_file(file_name, data):
     with open(file_name, "wb") as f:
         f.write(data)
 
-def generate(text, file_name, api_key, model="gemini-2.0-flash-exp"):
+def generate(text, file_name, api_key, model="gemini-2.0-flash"):
     # Initialize client using provided api_key (or fallback to env variable)
     client = genai.Client(api_key=(api_key.strip() if api_key and api_key.strip() != ""
-                                     else os.environ.get("GEMINI_API_KEY")))
+                                   else os.environ.get("GEMINI_API_KEY")))
     
     files = [ client.files.upload(file=file_name) ]
     
@@ -79,7 +79,8 @@ def process_image_and_prompt(composite_pil, prompt, gemini_api_key):
         
         file_name = composite_path  
         input_text = prompt 
-        model = "gemini-2.0-flash-exp" 
+        
+        model = "gemini-2.0-flash" 
 
         image_path, text_response = generate(text=input_text, file_name=file_name, api_key=gemini_api_key, model=model)
         
@@ -93,7 +94,7 @@ def process_image_and_prompt(composite_pil, prompt, gemini_api_key):
             # Return no image and the text response.
             return None, text_response
     except Exception as e:
-        raise gr.Error(f"Error Getting {e}", duration=5)
+        raise gr.Error(f"Error Getting {e}", duration=10)
 
 # --- KONFIGURASI TEMA MAROON & BEIGE ---
 my_theme = gr.themes.Default().set(
@@ -132,8 +133,7 @@ with gr.Blocks(theme=my_theme, css_paths="style.css") as demo:
         gr.Markdown("""
     - **Issue:** ❗ Sometimes the model returns text instead of an image.  
     ### 🔧 Steps to Address:
-    1. **🔑 Use Your Own Gemini API Key**  
-       - Get it for free from [Google AI Studio](https://aistudio.google.com/apikey).
+    1. **🔑 Use Your Own Gemini API Key** - Get it for free from [Google AI Studio](https://aistudio.google.com/apikey).
        - You **must** configure your own Gemini key for generation!  
     """)
 

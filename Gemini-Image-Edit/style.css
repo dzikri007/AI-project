@@ -1,9 +1,6 @@
-/* Creating a more modern looking UI for the Gemini Image Editing App */
-/* Global Styles */
-/* Creating a more modern looking UI for the Gemini Image Editing App */
 /* Global Styles - Disesuaikan dengan Tema Maroon & Beige */
 :root {
-  --primary-color: #800000;      /* Maroon */
+  --primary-color: #800000;       /* Maroon */
   --primary-light: #A52A2A;      /* Lighter Maroon / Brown */
   --primary-dark: #5A0000;       /* Dark Maroon */
   --secondary-color: #8B0000;    /* Dark Red (untuk gradasi) */
@@ -19,22 +16,13 @@
   --header-gradient: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
 }
 
-/* Dark mode support - Disesuaikan agar bernuansa Dark Maroon */
+/* Dark mode support - Bernuansa Dark Maroon Premium */
 .dark {
   --text-color: #F5F5DC;         /* Teks jadi Beige */
   --text-light: #D3C4C4;
   --bg-color: #1A0D0D;           /* Background gelap (hitam kemerahan) */
   --card-bg: #2E1515;            /* Kartu warna cokelat/maroon gelap */
   --border-color: #4A2525;
-}
-
-/* Dark mode support */
-.dark {
-  --text-color: #e2e8f0;
-  --text-light: #94a3b8;
-  --bg-color: #0f172a;
-  --card-bg: #1e293b;
-  --border-color: #334155;
 }
 
 /* Base container styling */
@@ -121,7 +109,6 @@
   cursor: pointer;
 }
 
-
 /* Input fields */
 .gr-input, .gr-textarea {
   width: 100%;
@@ -150,15 +137,14 @@
 .gr-button.gr-button-primary, 
 button.generate-btn,
 #component-54 > div.svelte-1pf7t34 > div > button {
-  /* ... (biarkan kode lainnya tetap sama) ... */
-  box-shadow: 0 4px 6px -1px rgba(128, 0, 0, 0.4) !important; /* Ubah rgba jadi merah muda */
+  box-shadow: 0 4px 6px -1px rgba(128, 0, 0, 0.4) !important;
 }
 
 .gr-button.gr-button-primary:hover,
 button.generate-btn:hover,
 #component-54 > div.svelte-1pf7t34 > div > button:hover {
   transform: translateY(-2px) !important;
-  box-shadow: 0 10px 15px -3px rgba(128, 0, 0, 0.4) !important; /* Ubah rgba jadi merah muda */
+  box-shadow: 0 10px 15px -3px rgba(128, 0, 0, 0.4) !important;
 }
 
 .gr-button.gr-button-primary:active,
@@ -199,31 +185,27 @@ button.generate-btn:active,
   color: var(--text-color);
 }
 
-/* Examples section - Fixed for dark mode */
+/* Examples section */
 .gr-examples-header {
   font-weight: 600 !important;
   margin: 2rem 0 1rem !important;
   padding-bottom: 0.5rem !important;
-  /* Removed border-bottom to avoid duplicate lines */
   color: var(--primary-light) !important;
   font-size: 1.5rem !important;
   display: block !important;
   visibility: visible !important;
 }
 
-/* Handling duplicate lines coming up below the examples header */
 .gradio-container hr {
   display: none !important;
 }
 
-/* Fix horizontal separator styling if needed */
 .gradio-container hr:first-of-type {
   display: block !important;
   border-top: 2px solid var(--primary-light) !important;
   margin: 1rem 0 2rem 0 !important;
 }
 
-/* Fix dark mode examples grid */
 .gr-examples {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -231,7 +213,6 @@ button.generate-btn:active,
   margin-top: 1.5rem;
 }
 
-/* Fix dark mode examples background */
 .gr-sample {
   background-color: var(--card-bg) !important;
   border-radius: var(--radius);
@@ -252,7 +233,6 @@ button.generate-btn:active,
   object-fit: cover;
 }
 
-/* Examples table styling fixes for dark mode */
 table {
   background-color: transparent !important;
   color: var(--text-color) !important;
@@ -286,7 +266,6 @@ table td {
   }
 }
 
-/* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -305,7 +284,6 @@ table td {
   background: var(--primary-color);
 }
 
-/* Ensure proper viewport handling for mobile */
 @media screen and (max-width: 767px) {
   body, html {
     overflow-x: hidden !important;
@@ -313,7 +291,6 @@ table td {
     max-width: 100% !important;
   }
   
-  /* Force central alignment for the entire app container */
   .gradio-container {
     padding: 1rem !important;
     margin: 0 auto !important;
@@ -325,7 +302,6 @@ table td {
     overflow-x: hidden !important;
   }
   
-  /* Fix header container on mobile */
   .header-container {
     flex-direction: column !important;
     text-align: center !important;
@@ -336,7 +312,6 @@ table td {
     margin-right: auto !important;
   }
   
-  /* Ensure all content blocks are properly centered */
   .main-content, 
   .input-column, 
   .output-column,
@@ -355,14 +330,11 @@ table td {
     box-sizing: border-box !important;
   }
   
- 
-  /* Fix examples area */
   .gr-examples {
     grid-template-columns: 1fr !important;
     width: 100% !important;
   }
   
-  /* Fix example tables on mobile */
   table {
     table-layout: fixed !important;
     width: 100% !important;
@@ -373,7 +345,6 @@ table td {
   }
 }
 
-/* Fix for extreme narrow screens (small Android phones) */
 @media screen and (max-width: 380px) {
   .header-container h1 {
     font-size: 1.8rem !important;
@@ -383,14 +354,12 @@ table td {
     font-size: 0.9rem !important;
   }
   
-  /* Stack everything vertically */
   .gr-panel {
     display: flex !important;
     flex-direction: column !important;
   }
 }
 
-/* Custom fix for the container to always stay centered on any device */
 #gradio-app {
   display: flex !important;
   justify-content: center !important;
@@ -400,7 +369,6 @@ table td {
   overflow-x: hidden !important;
 }
 
-/* Ensure the root container doesn't cause horizontal scroll */
 .root {
   max-width: 100% !important;
   overflow-x: hidden !important;
