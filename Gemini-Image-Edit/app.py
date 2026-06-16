@@ -15,7 +15,7 @@ def save_binary_file(file_name, data):
     with open(file_name, "wb") as f:
         f.write(data)
 
-def generate(text, file_name, api_key, model="gemini-2.0-flash"):
+def generate(text, file_name, api_key, model="gemini-2.5-flash-image"):
     # Initialize client using provided api_key (or fallback to env variable)
     client = genai.Client(api_key=(api_key.strip() if api_key and api_key.strip() != ""
                                    else os.environ.get("GEMINI_API_KEY")))
@@ -39,8 +39,7 @@ def generate(text, file_name, api_key, model="gemini-2.0-flash"):
         top_p=0.95,
         top_k=40,
         max_output_tokens=8192,
-        response_modalities=["image", "text"],
-        response_mime_type="text/plain",
+        response_modalities=["TEXT", "IMAGE"],
     )
 
     text_response = ""
@@ -70,7 +69,15 @@ def generate(text, file_name, api_key, model="gemini-2.0-flash"):
     del files
     return image_path, text_response
 
-def process_image_and_prompt(composite_pil, prompt, gemini_api_key):
+def process_image_and_prompt(composite_pil, prompt, gemini_api_key, model):
+    if composite_pil is None:
+        raise gr.Error("Silakan unggah gambar terlebih dahulu!", duration=5)
+    if not prompt or prompt.strip() == "":
+        raise gr.Error("Silakan masukkan prompt pengeditan terlebih dahulu!", duration=5)
+    if not gemini_api_key or gemini_api_key.strip() == "":
+        if not os.environ.get("GEMINI_API_KEY"):
+            raise gr.Error("API Key Gemini tidak ditemukan! Silakan masukkan API Key Anda di kolom yang disediakan.", duration=10)
+            
     try:
         # Save the composite image to a temporary file.
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -79,8 +86,6 @@ def process_image_and_prompt(composite_pil, prompt, gemini_api_key):
         
         file_name = composite_path  
         input_text = prompt 
-        
-        model = "gemini-2.0-flash" 
 
         image_path, text_response = generate(text=input_text, file_name=file_name, api_key=gemini_api_key, model=model)
         
@@ -94,7 +99,18 @@ def process_image_and_prompt(composite_pil, prompt, gemini_api_key):
             # Return no image and the text response.
             return None, text_response
     except Exception as e:
-        raise gr.Error(f"Error Getting {e}", duration=10)
+        err_msg = str(e)
+        if "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
+            raise gr.Error(
+                "Quota Terbatas / RESOURCE_EXHAUSTED! Model pembuatan gambar Gemini memerlukan kuas/proyek dengan billing aktif (paid tier) di Google AI Studio. Silakan aktifkan penagihan pada akun AI Studio Anda.",
+                duration=15
+            )
+        elif "response modalities" in err_msg.lower() or "modality" in err_msg.lower() or "supports text output" in err_msg.lower():
+            raise gr.Error(
+                f"Model '{model}' tidak mendukung pembuatan/pengeditan gambar. Silakan pilih model khusus gambar seperti 'gemini-2.5-flash-image' atau 'gemini-3.1-flash-image'.",
+                duration=15
+            )
+        raise gr.Error(f"Error Getting {err_msg}", duration=15)
 
 # --- KONFIGURASI TEMA MAROON & BEIGE ---
 my_theme = gr.themes.Default().set(
@@ -108,7 +124,7 @@ my_theme = gr.themes.Default().set(
 )
 
 # Build a Blocks-based interface with custom Theme, HTML header and CSS
-with gr.Blocks(theme=my_theme, css_paths="style.css") as demo:
+with gr.Blocks() as demo:
     
     # Custom HTML header dengan informasi milik Owi
     gr.HTML(
@@ -161,6 +177,12 @@ with gr.Blocks(theme=my_theme, css_paths="style.css") as demo:
                 label="Gemini API Key (optional)",
                 elem_classes="api-key-input"
             )
+            model_input = gr.Dropdown(
+                choices=["gemini-2.5-flash-image", "gemini-3.1-flash-image", "gemini-3-pro-image"],
+                value="gemini-2.5-flash-image",
+                label="Model Gemini (Image Output)",
+                elem_classes="model-select"
+            )
             prompt_input = gr.Textbox(
                 lines=2,
                 placeholder="Mau edit apa hari ini? Ketik di sini...",
@@ -180,21 +202,21 @@ with gr.Blocks(theme=my_theme, css_paths="style.css") as demo:
     # Set up the interaction with two outputs.
     submit_btn.click(
         fn=process_image_and_prompt,
-        inputs=[image_input, prompt_input, gemini_api_key],
+        inputs=[image_input, prompt_input, gemini_api_key, model_input],
         outputs=[output_gallery, output_text],
     )
     
     gr.Markdown("## Coba Contoh Berikut", elem_classes="gr-examples-header")
     
     examples = [
-        ["data/1.webp", 'change text to "OWI"', ""],
-        ["data/2.webp", "remove the spoon from hand only", ""],
-        ["data/3.webp", 'change text to "Make it Awesome"', ""],
-        ["data/1.jpg", "add joker style only on face", ""],
-        ["data/1777043.jpg", "add joker style only on face", ""],
-        ["data/2807615.jpg", "add lipstick on lip only", ""],
-        ["data/76860.jpg", "add lipstick on lip only", ""],
-        ["data/2807615.jpg", "make it happy looking face only", ""],
+        ["data/1.webp", 'change text to "OWI"'],
+        ["data/2.webp", "remove the spoon from hand only"],
+        ["data/3.webp", 'change text to "Make it Awesome"'],
+        ["data/1.jpg", "add joker style only on face"],
+        ["data/1777043.jpg", "add joker style only on face"],
+        ["data/2807615.jpg", "add lipstick on lip only"],
+        ["data/76860.jpg", "add lipstick on lip only"],
+        ["data/2807615.jpg", "make it happy looking face only"],
     ]
     
     gr.Examples(
@@ -203,4 +225,4 @@ with gr.Blocks(theme=my_theme, css_paths="style.css") as demo:
         elem_id="examples-grid"
     )
 
-demo.queue(max_size=50).launch(mcp_server=True)
+demo.queue(max_size=50).launch(mcp_server=True, theme=my_theme, css_paths="style.css")
