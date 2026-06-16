@@ -145,7 +145,7 @@ with gr.Blocks() as demo:
     """
     )
     
-    with gr.Accordion("⚠️ API Configuration ⚠️", open=False, elem_classes="config-accordion"):
+    with gr.Accordion("⚠️ API Konfigurasi ⚠️", open=False, elem_classes="config-accordion"):
         gr.Markdown("""
     - **Issue:** ❗ Sometimes the model returns text instead of an image.  
     ### 🔧 Steps to Address:
