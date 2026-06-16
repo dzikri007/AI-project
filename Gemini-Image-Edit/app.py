@@ -149,13 +149,13 @@ with gr.Blocks() as demo:
         gr.Markdown("""
     - **Issue:** ❗ Sometimes the model returns text instead of an image.  
     ### 🔧 Steps to Address:
-    1. **🔑 Use Your Own Gemini API Key** - Get it for free from [Google AI Studio](https://aistudio.google.com/apikey).
+    1. **🔑 Gunakan API Key Anda** - Get it for free from [Google AI Studio](https://aistudio.google.com/apikey).
        - You **must** configure your own Gemini key for generation!  
     """)
 
     with gr.Accordion("📌 Usage Instructions", open=False, elem_classes="instructions-accordion"):
         gr.Markdown("""
-    ### 📌 Cara Pakai (Made by Owi)
+    ### 📌 Cara Pakai (Made by Dzikri)
     - Upload gambar yang mau lu edit.
     - Ketik perintah (prompt) pengeditannya (contoh: "jadikan fotonya hitam putih").
     - Jika API error atau gagal bikin gambar, dia bakal balikin respon teks.
