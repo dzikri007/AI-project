@@ -150,7 +150,7 @@ with gr.Blocks() as demo:
     - **Issue:** ❗ Sometimes the model returns text instead of an image.  
     ### 🔧 Steps to Address:
     1. **🔑 Gunakan API Key Anda** - Get it for free from [Google AI Studio](https://aistudio.google.com/apikey).
-       - You **must** configure your own Gemini key for generation!  
+       - Kalian **harus** mengkonfigurasi API key kalian sendiri untuk dapat menggunakan layanan ini!  
     """)
 
     with gr.Accordion("📌 Usage Instructions", open=False, elem_classes="instructions-accordion"):
