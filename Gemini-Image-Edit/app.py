@@ -126,7 +126,7 @@ my_theme = gr.themes.Default().set(
 # Build a Blocks-based interface with custom Theme, HTML header and CSS
 with gr.Blocks() as demo:
     
-    # Custom HTML header dengan informasi milik Owi
+    # Custom HTML header dengan informasi milik 
     gr.HTML(
     """
     <div class="header-container">
@@ -134,7 +134,7 @@ with gr.Blocks() as demo:
           <img src="https://www.gstatic.com/lamda/images/gemini_favicon_f069958c85030456e93de685481c559f160ea06b.png" alt="App logo">
       </div>
       <div>
-          <h1>AI Image Editor by Owi</h1>
+          <h1>AI Image Editor by Dzikri</h1>
           <p>Powered by <a href="https://gradio.app/">Gradio</a>⚡️ & Gemini 2.0 | 
           <a href="https://aistudio.google.com/apikey">Get an API Key</a> <br> 
           Follow me on: 
